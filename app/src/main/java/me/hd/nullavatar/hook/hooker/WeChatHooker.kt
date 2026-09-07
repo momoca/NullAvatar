@@ -1,6 +1,7 @@
 package me.hd.nullavatar.hook.hooker
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.util.Log
 import com.highcapable.kavaref.KavaRef.Companion.asResolver
 import me.hd.nullavatar.hook.base.BaseHook
@@ -70,6 +71,57 @@ object WeChatHooker : BaseHook() {
         return matches.single()
     }
 
+
+    private fun logPng(label: String, bytes: ByteArray) {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        require(bounds.outWidth > 0 && bounds.outHeight > 0 &&
+            bounds.outWidth.toLong() * bounds.outHeight <= 16_000_000L) {
+            "Invalid or oversized avatar: ${bounds.outWidth}x${bounds.outHeight}"
+        }
+        val bitmap = requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) {
+            "Cannot decode avatar"
+        }
+        try {
+            var transparent = 0L
+            var partial = 0L
+            val row = IntArray(bitmap.width)
+            for (y in 0 until bitmap.height) {
+                bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+                for (pixel in row) {
+                    val alpha = pixel ushr 24
+                    if (alpha == 0) transparent++ else if (alpha < 255) partial++
+                }
+            }
+            Log.i(TAG, "$label: ${bitmap.width}x${bitmap.height}, " +
+                "hasAlpha=${bitmap.hasAlpha()}, transparent=$transparent, partial=$partial, bytes=${bytes.size}")
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun replacementPng(ctx: Context): ByteArray {
+        val source = File(ctx.filesDir, "NullAvatar.png")
+        val png = if (source.exists()) {
+            require(source.isFile && source.length() in 1L..20_000_000L) {
+                "Custom PNG is empty, oversized, or not a file: $source"
+            }
+            Log.i(TAG, "Replacement mode: original PNG bytes from $source")
+            source.readBytes()
+        } else {
+            Log.i(TAG, "Replacement mode: default transparent 64x64")
+            AvatarUtil.getBitmap(ctx).toStream().use { it.toByteArray() }
+        }
+        val signature = byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)
+        require(png.size >= signature.size &&
+            signature.indices.all { png[it] == signature[it] }) {
+            "Replacement file is not a PNG; skipping overwrite"
+        }
+        // Decode only for diagnostics. The decoded bitmap is never used for writing.
+        logPng("Source PNG", png)
+        return png
+    }
+
     override fun onBaseHook(ctx: Context, loader: ClassLoader) {
         getClipBitmapMethod.toAppMethod().hook {
             after {
@@ -85,13 +137,12 @@ object WeChatHooker : BaseHook() {
                         val target = resolveAvatarFile(ctx, path)
                         Log.i(TAG, "Resolved avatar: ${target.absolutePath}")
 
-                        // Prepare the PNG before opening (and truncating) the target.
-                        // AvatarUtil loads files/NullAvatar.png, or the default transparent image.
-                        AvatarUtil.getBitmap(ctx).toStream().use { png ->
-                            check(png.size() > 0) { "Replacement PNG is empty" }
-                            target.outputStream().use { png.writeTo(it) }
-                            Log.i(TAG, "Overwrite avatar: ${target.absolutePath} (${png.size()} bytes)")
-                        }
+                        val png = replacementPng(ctx)
+                        target.writeBytes(png)
+                        val written = target.readBytes()
+                        check(written.contentEquals(png)) { "Avatar read-back differs from source" }
+                        logPng("Written avatar", written)
+                        Log.i(TAG, "Overwrite avatar: ${target.absolutePath} (${png.size} bytes, byteExact=true)")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "WeChat avatar replacement failed", e)
