@@ -13,7 +13,7 @@ import java.io.FileNotFoundException
 
 object WeChatHooker : BaseHook() {
     private const val TAG = "NullAvatar"
-    private const val WCF_AVATAR_PREFIX = "wcf:/avatar/"
+    private val WCF_AVATAR_PREFIXES = listOf("wcf:/avatar/", "wcf://avatar/")
     private lateinit var getClipBitmapMethod: DexMethod
 
     override fun onDexFind(dexkit: DexKitBridge) {
@@ -29,12 +29,14 @@ object WeChatHooker : BaseHook() {
 
     private fun resolveAvatarFile(ctx: Context, path: String): File {
         require(path.isNotBlank()) { "Empty WeChat avatar path" }
-        if (!path.startsWith(WCF_AVATAR_PREFIX)) {
+        // WeChat versions use both single-slash and double-slash WCF paths.
+        val prefix = WCF_AVATAR_PREFIXES.firstOrNull { path.startsWith(it) }
+        if (prefix == null) {
             require(!path.startsWith("wcf:")) { "Unsupported WeChat VFS path: $path" }
             return File(path)
         }
 
-        val relativePath = path.removePrefix(WCF_AVATAR_PREFIX)
+        val relativePath = path.removePrefix(prefix)
         require(relativePath.split('/').none { it.isBlank() || it == "." || it == ".." }) {
             "Invalid WCF avatar path: $path"
         }
